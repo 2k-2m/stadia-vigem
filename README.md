@@ -36,3 +36,13 @@ Thanks to following libraries and resources:
 - https://github.com/libusb/hidapi for HID implementation
 - https://github.com/zserge/tray for lightweight tray app implementation
 - https://www.flaticon.com/authors/freepik for application icon
+
+## Nota sobre vibracion por Bluetooth (issue #16)
+
+Este fork agrega diagnostico para el problema reportado en el issue #16, donde la vibracion no funciona al conectar el control por Bluetooth. Se confirmo que el control usa BLE (HID over GATT), y que el reporte HID que se envia es correcto: mismo ID, tamano y formato que en la conexion por USB, donde la vibracion si funciona sin problema.
+
+El fallo esta del lado de Windows. Tanto `WriteFile` como `HidD_SetOutputReport` (en sus distintas variantes, con handle sincrono y asincrono) devuelven el error 87 (`ERROR_INVALID_PARAMETER`) al intentar enviar el reporte de salida por Bluetooth LE. Esto indica que el propio driver Bluetooth LE de Windows rechaza el envio, no el codigo de este proyecto. Coincide con lo que reporto el equipo de reWASD tras investigar el mismo problema. En Linux y macOS la vibracion funciona correctamente por Bluetooth, lo que refuerza que se trata de una limitacion especifica de Windows.
+
+El logging de diagnostico usado para esta investigacion esta en `libstadia/src/hid.c`, controlado por la macro `STADIA_DEBUG_LOGGING` (desactivada por defecto). Para reproducir los logs basta con poner esa macro en `1` y recompilar.
+
+Fork de [walkco/stadia-vigem](https://github.com/walkco/stadia-vigem), basado en [Mi-ViGEm](https://github.com/grayver/Mi-ViGEm) de grayver, con el driver [ViGEmBus](https://github.com/ViGEm/ViGEmBus) de Nefarius.
