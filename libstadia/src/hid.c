@@ -5,6 +5,8 @@
 #include "hid.h"
 
 #include "utils.h"
+#include <stdio.h>
+#include <stdarg.h>
 
 #include <tchar.h>
 #include <initguid.h>
@@ -21,6 +23,39 @@
 
 static BOOL got_hid_class = FALSE;
 static GUID hid_class;
+
+/*
+ * Set to 1 to enable debug logging to stadia-debug.log (used to diagnose
+ * the Bluetooth vibration issue, see GitHub issue #16). Set to 0 for
+ * normal use, so the program does not write to disk continuously.
+ */
+#define STADIA_DEBUG_LOGGING 0
+/*
+ * Simple debug logging helper. Appends a line with a timestamp
+ * to a fixed log file so we can inspect HID errors after the fact.
+ */
+static void debug_log(const char *format, ...)
+{
+#if STADIA_DEBUG_LOGGING
+    FILE *log_file = fopen("stadia-debug.log", "a");
+    if (log_file == NULL)
+    {
+        return;
+    }
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(log_file, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(log_file, format, args);
+    va_end(args);
+
+    fprintf(log_file, "\n");
+    fclose(log_file);
+#endif
+}
 
 GUID hid_get_class()
 {
@@ -250,6 +285,15 @@ BOOL check_vendor_and_product(LPTSTR path, USHORT vendor_id, USHORT product_id)
     }
 }
 
+/*
+ * Determines whether a HID device path corresponds to a Bluetooth (BLE / HOGP)
+ * depending on how the HID device was enumerated.
+ */
+BOOL hid_is_bluetooth_device(LPTSTR path)
+{
+    return _tcsistr(path, TEXT("vid&0218d1_pid&9400")) != NULL;
+}
+
 void hid_free_device_info(struct hid_device_info *device_info)
 {
     free(device_info->description);
@@ -287,10 +331,56 @@ struct hid_device *hid_open_device(LPTSTR path, BOOL access_rw, BOOL shared)
         return NULL;
     }
 
+    debug_log("hid_open_device: NumberOutputValueCaps=%d NumberOutputButtonCaps=%d OutputReportByteLength=%d",
+            caps.NumberOutputValueCaps, caps.NumberOutputButtonCaps, caps.OutputReportByteLength);
+
+    debug_log("hid_open_device: FeatureReportByteLength=%d NumberFeatureValueCaps=%d NumberFeatureButtonCaps=%d",
+        caps.FeatureReportByteLength, caps.NumberFeatureValueCaps, caps.NumberFeatureButtonCaps);
+    if (caps.NumberOutputValueCaps > 0)
+    {
+        USHORT value_caps_length = caps.NumberOutputValueCaps;
+        PHIDP_VALUE_CAPS value_caps = (PHIDP_VALUE_CAPS)malloc(value_caps_length * sizeof(HIDP_VALUE_CAPS));
+        if (HidP_GetValueCaps(HidP_Output, value_caps, &value_caps_length, pp_data) == HIDP_STATUS_SUCCESS)
+        {
+            for (USHORT i = 0; i < value_caps_length; i++)
+            {
+                debug_log("hid_open_device: OutputValueCap[%d] ReportID=0x%02X UsagePage=0x%04X Usage=0x%04X",
+                        i, value_caps[i].ReportID, value_caps[i].UsagePage, value_caps[i].NotRange.Usage);
+            }
+        }
+        free(value_caps);
+    }
+
+    if (caps.NumberOutputButtonCaps > 0)
+    {
+        USHORT button_caps_length = caps.NumberOutputButtonCaps;
+        PHIDP_BUTTON_CAPS button_caps = (PHIDP_BUTTON_CAPS)malloc(button_caps_length * sizeof(HIDP_BUTTON_CAPS));
+        if (HidP_GetButtonCaps(HidP_Output, button_caps, &button_caps_length, pp_data) == HIDP_STATUS_SUCCESS)
+        {
+            for (USHORT i = 0; i < button_caps_length; i++)
+            {
+                debug_log("hid_open_device: OutputButtonCap[%d] ReportID=0x%02X UsagePage=0x%04X",
+                        i, button_caps[i].ReportID, button_caps[i].UsagePage);
+            }
+        }
+        free(button_caps);
+    }
+
     struct hid_device *dev = (struct hid_device *)malloc(sizeof(struct hid_device));
     dev->path = (LPTSTR)malloc((_tcslen(path) + 1) * sizeof(TCHAR));
     _tcscpy(dev->path, path);
+    debug_log("hid_open_device: path=%ws", dev->path);
     dev->handle = handle;
+    dev->sync_handle = CreateFile(path, desired_access, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, 0);
+    if (dev->sync_handle == INVALID_HANDLE_VALUE)
+    {
+        debug_log("hid_open_device: sync_handle FAILED to open, GetLastError=%lu", GetLastError());
+        dev->sync_handle = NULL;
+    }
+    else
+    {
+        debug_log("hid_open_device: sync_handle opened OK");
+    }
     dev->read_pending = FALSE;
     dev->input_report_size = caps.InputReportByteLength;
     dev->output_report_size = caps.OutputReportByteLength;
@@ -359,6 +449,35 @@ INT hid_send_output_report(struct hid_device *device, const void *data, size_t l
     DWORD bytes_written = 0;
     HANDLE ev = device->output_ol.hEvent;
 
+    debug_log("hid_send_output_report: length=%zu output_report_size=%u", length, device->output_report_size);
+    
+    BOOL is_bt = hid_is_bluetooth_device(device->path);
+    debug_log("hid_send_output_report: is_bluetooth=%d path=%ws", is_bt, device->path);
+
+    if (is_bt && device->sync_handle != NULL)
+    {
+        memset(device->output_buffer, 0x0, device->output_report_size);
+        memmove(device->output_buffer, data, length > device->output_report_size ? device->output_report_size : length);
+
+        if (HidD_SetOutputReport(device->sync_handle, device->output_buffer, device->output_report_size))
+        {
+            debug_log("hid_send_output_report: HidD_SetOutputReport (sync handle) SUCCEEDED");
+            return device->output_report_size;
+        }
+
+        debug_log("hid_send_output_report: HidD_SetOutputReport (sync handle) FAILED, GetLastError=%lu", GetLastError());
+
+        DWORD sync_written = 0;
+        if (WriteFile(device->sync_handle, device->output_buffer, device->output_report_size, &sync_written, NULL))
+        {
+            debug_log("hid_send_output_report: WriteFile (sync handle) SUCCEEDED, bytes=%lu", sync_written);
+            return (INT)sync_written;
+        }
+
+        debug_log("hid_send_output_report: WriteFile (sync handle) FAILED, GetLastError=%lu", GetLastError());
+        return -1;
+    }
+
     if (!device->write_pending)
     {
         device->write_pending = TRUE;
@@ -369,8 +488,10 @@ INT hid_send_output_report(struct hid_device *device, const void *data, size_t l
         ResetEvent(ev);
         if (!WriteFile(device->handle, device->output_buffer, device->output_report_size, &bytes_written, &device->output_ol))
         {
-            if (GetLastError() != ERROR_IO_PENDING)
+            DWORD write_error = GetLastError();
+            if (write_error != ERROR_IO_PENDING)
             {
+                debug_log("hid_send_output_report: WriteFile FAILED, GetLastError=%lu", write_error);
                 CancelIo(device->handle);
                 device->write_pending = FALSE;
                 return -1;
@@ -397,6 +518,7 @@ INT hid_send_output_report(struct hid_device *device, const void *data, size_t l
         return bytes_written;
     }
 
+    debug_log("hid_send_output_report: GetOverlappedResult FAILED, GetLastError=%lu", GetLastError());
     device->write_pending = FALSE;
     return -1;
 }
@@ -424,7 +546,12 @@ void hid_close_device(struct hid_device *device)
     CancelIoEx(device->handle, NULL);
     CloseHandle(device->input_ol.hEvent);
     CloseHandle(device->output_ol.hEvent);
+    if (device->sync_handle != NULL)
+    {
+        CloseHandle(device->sync_handle);
+    }
     CloseHandle(device->handle);
+
 }
 
 void hid_free_device(struct hid_device *device)
