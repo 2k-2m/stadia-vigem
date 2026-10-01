@@ -11,6 +11,7 @@
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "gdi32.lib")
 
 #define WM_TRAY_CALLBACK_MESSAGE (WM_USER + 1)
 #define WC_TRAY_CLASS_NAME TEXT("StadiaViGEmClass")
@@ -23,7 +24,13 @@ static HWND window_handle = NULL;
 static HMENU hmenu = NULL;
 static HANDLE hmutex;
 static HDEVNOTIFY hdevntf;
+
+#define MAX_MENU_BITMAPS 16
+static HBITMAP menu_bitmaps[MAX_MENU_BITMAPS];
+static int menu_bitmap_count = 0;
+
 static void (*devntf_cb)(UINT op, LPTSTR path) = NULL;
+static void (*click_cb)(POINT anchor) = NULL;
 
 static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
@@ -45,6 +52,11 @@ static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
             POINT p;
             GetCursorPos(&p);
             SetForegroundWindow(hwnd);
+            if (click_cb != NULL)
+            {
+                click_cb(p);
+                return 0;
+            }
             BOOL cmd = TrackPopupMenu(hmenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
                                       p.x, p.y, 0, hwnd, NULL);
             SendMessage(hwnd, WM_COMMAND, cmd, 0);
@@ -95,6 +107,82 @@ static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
+/* Convierte un icono en un bitmap ARGB premultiplicado para usarlo en un item de menu. */
+static HBITMAP _icon_to_menu_bitmap(LPTSTR name)
+{
+    int size = GetSystemMetrics(SM_CXICON);
+    HICON hicon = (HICON)LoadImage(wc.hInstance, name, IMAGE_ICON, size, size, LR_DEFAULTCOLOR);
+    if (hicon == NULL)
+    {
+        return NULL;
+    }
+
+    HBITMAP result = NULL;
+    ICONINFO ii;
+    if (GetIconInfo(hicon, &ii))
+    {
+        BITMAP bm;
+        if (ii.hbmColor != NULL && GetObject(ii.hbmColor, sizeof(bm), &bm) != 0 && bm.bmWidth > 0 && bm.bmHeight > 0)
+        {
+            int w = bm.bmWidth, h = bm.bmHeight;
+            BITMAPINFO bi;
+            memset(&bi, 0, sizeof(bi));
+            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bi.bmiHeader.biWidth = w;
+            bi.bmiHeader.biHeight = -h; /* de arriba hacia abajo */
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB;
+
+            BYTE *src = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * h * 4);
+            HDC dc = GetDC(NULL);
+            if (src != NULL && dc != NULL && GetDIBits(dc, ii.hbmColor, 0, h, src, &bi, DIB_RGB_COLORS) == h)
+            {
+                BYTE *dst = NULL;
+                result = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)&dst, NULL, 0);
+                if (result != NULL && dst != NULL)
+                {
+                    BOOL has_alpha = FALSE;
+                    for (int i = 0; i < w * h; i++)
+                    {
+                        if (src[i * 4 + 3] != 0)
+                        {
+                            has_alpha = TRUE;
+                            break;
+                        }
+                    }
+                    for (int i = 0; i < w * h; i++)
+                    {
+                        BYTE a = has_alpha ? src[i * 4 + 3] : 255;
+                        dst[i * 4 + 0] = (BYTE)(src[i * 4 + 0] * a / 255);
+                        dst[i * 4 + 1] = (BYTE)(src[i * 4 + 1] * a / 255);
+                        dst[i * 4 + 2] = (BYTE)(src[i * 4 + 2] * a / 255);
+                        dst[i * 4 + 3] = a;
+                    }
+                }
+            }
+            if (dc != NULL)
+            {
+                ReleaseDC(NULL, dc);
+            }
+            if (src != NULL)
+            {
+                HeapFree(GetProcessHeap(), 0, src);
+            }
+        }
+        if (ii.hbmColor != NULL)
+        {
+            DeleteObject(ii.hbmColor);
+        }
+        if (ii.hbmMask != NULL)
+        {
+            DeleteObject(ii.hbmMask);
+        }
+    }
+    DestroyIcon(hicon);
+    return result;
+}
+
 static HMENU _tray_menu(struct tray_menu *m, UINT *id)
 {
     HMENU new_menu = CreatePopupMenu();
@@ -109,7 +197,7 @@ static HMENU _tray_menu(struct tray_menu *m, UINT *id)
             MENUITEMINFO item;
             memset(&item, 0, sizeof(item));
             item.cbSize = sizeof(MENUITEMINFO);
-            item.fMask = MIIM_ID | MIIM_TYPE | MIIM_STATE | MIIM_DATA;
+            item.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STRING | MIIM_STATE | MIIM_DATA;
             item.fType = 0;
             item.fState = 0;
             if (m->submenu != NULL)
@@ -125,6 +213,20 @@ static HMENU _tray_menu(struct tray_menu *m, UINT *id)
             {
                 item.fState |= MFS_CHECKED;
             }
+            if (m->icon != NULL)
+            {
+                HBITMAP bmp = _icon_to_menu_bitmap(m->icon);
+                if (bmp != NULL && menu_bitmap_count < MAX_MENU_BITMAPS)
+                {
+                    menu_bitmaps[menu_bitmap_count++] = bmp;
+                    item.fMask |= MIIM_BITMAP;
+                    item.hbmpItem = bmp;
+                }
+                else if (bmp != NULL)
+                {
+                    DeleteObject(bmp);
+                }
+            }
             item.wID = *id;
             item.dwTypeData = m->text;
             item.dwItemData = (ULONG_PTR)m;
@@ -133,6 +235,11 @@ static HMENU _tray_menu(struct tray_menu *m, UINT *id)
         }
     }
     return new_menu;
+}
+
+void tray_set_click_handler(void (*cb)(POINT anchor))
+{
+    click_cb = cb;
 }
 
 int tray_init(struct tray *tray)
@@ -195,10 +302,22 @@ int tray_loop(BOOLEAN blocking)
 void tray_update(struct tray *tray)
 {
     HMENU prevmenu = hmenu;
+    HBITMAP old_bitmaps[MAX_MENU_BITMAPS];
+    int old_bitmap_count = menu_bitmap_count;
+    memcpy(old_bitmaps, menu_bitmaps, sizeof(old_bitmaps));
+    menu_bitmap_count = 0;
     UINT id = ID_TRAY_FIRST;
     hmenu = _tray_menu(tray->menu, &id);
     SendMessage(window_handle, WM_INITMENUPOPUP, (WPARAM)hmenu, 0);
-    HICON hicon = LoadIcon(wc.hInstance, tray->icon);
+    HICON hicon = (HICON)
+    LoadImage(
+        wc.hInstance, 
+        tray->icon, 
+        IMAGE_ICON, 
+        GetSystemMetrics(SM_CXSMICON), 
+        GetSystemMetrics(SM_CYSMICON), 
+        LR_DEFAULTCOLOR
+    );
     if (nid.hIcon)
     {
         DestroyIcon(nid.hIcon);
@@ -210,6 +329,10 @@ void tray_update(struct tray *tray)
     if (prevmenu != NULL)
     {
         DestroyMenu(prevmenu);
+    }
+    for (int i = 0; i < old_bitmap_count; i++)
+    {
+        DeleteObject(old_bitmaps[i]);
     }
 }
 

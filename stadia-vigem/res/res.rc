@@ -1,6 +1,10 @@
 #include <winver.h>
 
 APP_ICON            ICON "icon.ico"
+ICON_BLANCO         ICON "icon_blanco.ico"
+ICON_NEGRO          ICON "icon_negro.ico"
+ICON_WASABI         ICON "icon_wasabi.ico"
+ICON_ERROR          ICON "icon_error.ico"
 
 VS_VERSION_INFO     VERSIONINFO
 FILEVERSION         1,0,0,0

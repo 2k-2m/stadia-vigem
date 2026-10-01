@@ -27,6 +27,7 @@ struct tray
 struct tray_menu
 {
     LPTSTR text;
+    LPTSTR icon;  /* nombre del recurso ICON a mostrar junto al texto */
     BOOLEAN disabled;
     BOOLEAN checked;
 
@@ -42,5 +43,6 @@ void tray_update(struct tray *tray);
 void tray_exit();
 void tray_register_device_notification(GUID filter, void (*cb)(UINT, LPTSTR));
 void tray_show_notification(UINT type, LPTSTR title, LPTSTR text);
+void tray_set_click_handler(void (*cb)(POINT anchor));
 
 #endif /* TRAY_H */
