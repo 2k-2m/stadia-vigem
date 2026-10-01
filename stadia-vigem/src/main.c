@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <tchar.h>
 #include <windows.h>
@@ -11,6 +12,7 @@
 #include <ViGEm/Client.h>
 
 #include "tray.h"
+#include "popup.h"
 #include "hid.h"
 #include "stadia.h"
 
@@ -19,7 +21,7 @@
 #endif
 
 #define MAX_ACTIVE_DEVICE_COUNT 4
-#define DEVICE_COUNT_TEMPLATE TEXT("%d/4 device(s) connected")
+
 
 struct active_device
 {
@@ -27,6 +29,7 @@ struct active_device
     struct stadia_controller *controller;
     PVIGEM_TARGET tgt_device;
     XUSB_REPORT tgt_report;
+    LPTSTR icon;
 };
 
 static int active_device_count = 0;
@@ -35,7 +38,6 @@ static SRWLOCK active_devices_lock = SRWLOCK_INIT;
 static PVIGEM_CLIENT vigem_client;
 static BOOL vigem_connected = FALSE;
 
-static struct tray_menu tray_menu_device_count;
 
 // future declarations
 static void stadia_controller_update_cb(struct stadia_controller *controller, struct stadia_state *state);
@@ -55,6 +57,36 @@ static struct tray tray =
         .tip = TEXT("Stadia Controller"),
         .menu = NULL};
 
+    // iconos de la bandeja: azul = sin mando conectado o error de ViGEmBus; al conectar un mando, uno al azar
+    static LPTSTR const tray_icons_normal[] = {TEXT("ICON_BLANCO"), TEXT("ICON_NEGRO"), TEXT("ICON_WASABI")};
+    #define TRAY_ICON_COUNT 3
+    #define TRAY_ICON_ERROR TEXT("ICON_ERROR")
+
+    // elige un icono al azar, evitando los que ya usan otros mandos conectados (si hay uno libre).
+    // Debe llamarse con active_devices_lock tomado.
+    static LPTSTR pick_device_icon()
+    {
+        int start = rand() % TRAY_ICON_COUNT;
+        for (int k = 0; k < TRAY_ICON_COUNT; k++)
+        {
+            LPTSTR candidate = tray_icons_normal[(start + k) % TRAY_ICON_COUNT];
+            BOOL used = FALSE;
+            for (int i = 0; i < active_device_count; i++)
+            {
+                if (active_devices[i]->icon == candidate)
+                {
+                    used = TRUE;
+                    break;
+                }
+            }
+            if (!used)
+            {
+                return candidate;
+            }
+        }
+        return tray_icons_normal[start];
+    }        
+
 SHORT FORCEINLINE _map_byte_to_short(BYTE value, BOOL inverted)
 {
     CHAR centered = value - 128;
@@ -69,26 +101,31 @@ SHORT FORCEINLINE _map_byte_to_short(BYTE value, BOOL inverted)
     return (SHORT)(32767 * centered / 127);
 }
 
+static TCHAR tray_menu_device_text[MAX_ACTIVE_DEVICE_COUNT][32];
+static const struct tray_menu tray_menu_no_device = {.text = TEXT("No controller connected"), .icon = TEXT("ICON_ERROR")};
+
 static void rebuild_tray_menu()
 {
     struct tray_menu *prev_menu = tray.menu;
-    
-    struct tray_menu *new_menu = (struct tray_menu *)malloc(5 * sizeof(struct tray_menu));
+
+    struct tray_menu *new_menu = (struct tray_menu *)malloc((MAX_ACTIVE_DEVICE_COUNT + 4) * sizeof(struct tray_menu));
     int index = 0;
 
     AcquireSRWLockShared(&active_devices_lock);
 
-    LPTSTR old_device_count_text = tray_menu_device_count.text;
-
-    INT tray_text_length = _sctprintf(DEVICE_COUNT_TEMPLATE, active_device_count);
-    tray_menu_device_count.text = (LPTSTR)malloc((tray_text_length + 1) * sizeof(TCHAR));
-    _stprintf(tray_menu_device_count.text, DEVICE_COUNT_TEMPLATE, active_device_count);
-
-    free(old_device_count_text);
+    if (active_device_count == 0)
+    {
+        new_menu[index++] = tray_menu_no_device;
+    }
+    for (int i = 0; i < active_device_count; i++)
+    {
+        _sntprintf(tray_menu_device_text[i], 32, TEXT("Controller %d"), i + 1);
+        struct tray_menu row = {.text = tray_menu_device_text[i], .icon = active_devices[i]->icon};
+        new_menu[index++] = row;
+    }
 
     ReleaseSRWLockShared(&active_devices_lock);
 
-    new_menu[index++] = tray_menu_device_count;
     new_menu[index++] = tray_menu_separator;
     new_menu[index++] = tray_menu_refresh;
     new_menu[index++] = tray_menu_quit;
@@ -155,11 +192,17 @@ static BOOL add_device(LPTSTR path)
     }
 
     AcquireSRWLockExclusive(&active_devices_lock);
+    active_device->icon = pick_device_icon();
     active_devices[active_device_count++] = active_device;
     ReleaseSRWLockExclusive(&active_devices_lock);
 
     rebuild_tray_menu();
+    if (vigem_connected)
+    {
+        tray.icon = active_device->icon;
+    }
     tray_update(&tray);
+    popup_request_refresh();
 
     if (!vigem_connected)
     {
@@ -333,7 +376,12 @@ static void stadia_controller_stop_cb(struct stadia_controller *controller)
     if (remove_device(controller))
     {
         rebuild_tray_menu();
+        if (active_device_count == 0)
+        {
+            tray.icon = TRAY_ICON_ERROR;
+        }
         tray_update(&tray);
+        popup_request_refresh();
     }
 }
 
@@ -358,13 +406,58 @@ static void quit_cb(struct tray_menu *item)
     tray_exit();
 }
 
+static void popup_refresh_cb(void)
+{
+    refresh_cb(NULL);
+}
+
+static void popup_quit_cb(void)
+{
+    quit_cb(NULL);
+}
+
+static int popup_snapshot(struct popup_item *out, int *max_count)
+{
+    int count = 0;
+
+    AcquireSRWLockShared(&active_devices_lock);
+    for (int i = 0; i < active_device_count && i < POPUP_MAX_ITEMS; i++)
+    {
+        out[count].icon = active_devices[i]->icon;
+        _sntprintf(out[count].name, 32, TEXT("Controller %d"), i + 1);
+        _tcscpy(out[count].conn,
+            hid_is_bluetooth_device(active_devices[i]->src_device->path) ? TEXT("Bluetooth") : TEXT("USB cable"));
+        count++;
+    }
+    ReleaseSRWLockShared(&active_devices_lock);
+
+    *max_count = MAX_ACTIVE_DEVICE_COUNT;
+    return count;
+}
+
+static void tray_click_cb(POINT anchor)
+{
+    struct popup_item snapshot[POPUP_MAX_ITEMS];
+    int max_count = 0;
+    int count = popup_snapshot(snapshot, &max_count);
+
+    popup_show(anchor, snapshot, count, max_count);
+}
+
 INT main()
 {
+    srand((unsigned int)GetTickCount());
+    tray.icon = TRAY_ICON_ERROR;
     rebuild_tray_menu();
     if (tray_init(&tray) < 0)
     {
         printf("Failed to create tray\n");
         return 1;
+    }
+    if (popup_init(popup_refresh_cb, popup_quit_cb))
+    {
+        popup_set_provider(popup_snapshot);
+        tray_set_click_handler(tray_click_cb);  
     }
     vigem_client = vigem_alloc();
     VIGEM_ERROR vigem_res = vigem_connect(vigem_client);
