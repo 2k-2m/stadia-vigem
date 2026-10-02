@@ -40,12 +40,12 @@ Thanks to following libraries and resources:
 - https://github.com/zserge/tray for lightweight tray app implementation
 - https://www.flaticon.com/authors/freepik for application icon
 
-## Nota sobre vibracion por Bluetooth (issue #16)
+## Note on Bluetooth vibration (issue #16)
 
-Este fork agrega diagnostico para el problema reportado en el issue #16, donde la vibracion no funciona al conectar el control por Bluetooth. Se confirmo que el control usa BLE (HID over GATT), y que el reporte HID que se envia es correcto: mismo ID, tamano y formato que en la conexion por USB, donde la vibracion si funciona sin problema.
+This fork adds diagnostics for the problem reported in issue #16, where vibration does not work when the controller is connected over Bluetooth. It was confirmed that the controller uses BLE (HID over GATT), and that the HID report being sent is correct: same ID, size and format as over USB, where vibration works without any problem.
 
-El fallo esta del lado de Windows. Tanto `WriteFile` como `HidD_SetOutputReport` (en sus distintas variantes, con handle sincrono y asincrono) devuelven el error 87 (`ERROR_INVALID_PARAMETER`) al intentar enviar el reporte de salida por Bluetooth LE. Esto indica que el propio driver Bluetooth LE de Windows rechaza el envio, no el codigo de este proyecto. Coincide con lo que reporto el equipo de reWASD tras investigar el mismo problema. En Linux y macOS la vibracion funciona correctamente por Bluetooth, lo que refuerza que se trata de una limitacion especifica de Windows.
+The failure is on the Windows side. Both `WriteFile` and `HidD_SetOutputReport` (in their different variants, with synchronous and asynchronous handles) return error 87 (`ERROR_INVALID_PARAMETER`) when trying to send the output report over Bluetooth LE. This indicates that the Windows Bluetooth LE driver itself rejects the write, not this project's code. It matches what the reWASD team reported after investigating the same problem. On Linux and macOS vibration works correctly over Bluetooth, which reinforces that this is a Windows-specific limitation.
 
-El logging de diagnostico usado para esta investigacion esta en `libstadia/src/hid.c`, controlado por la macro `STADIA_DEBUG_LOGGING` (desactivada por defecto). Para reproducir los logs basta con poner esa macro en `1` y recompilar.
+The diagnostic logging used for this investigation is in `libstadia/src/hid.c`, controlled by the `STADIA_DEBUG_LOGGING` macro (disabled by default). To reproduce the logs, set that macro to `1` and rebuild.
 
-Fork de [walkco/stadia-vigem](https://github.com/walkco/stadia-vigem), basado en [Mi-ViGEm](https://github.com/grayver/Mi-ViGEm) de grayver, con el driver [ViGEmBus](https://github.com/ViGEm/ViGEmBus) de Nefarius.
+Fork of [walkco/stadia-vigem](https://github.com/walkco/stadia-vigem), based on [Mi-ViGEm](https://github.com/grayver/Mi-ViGEm) by grayver, with the [ViGEmBus](https://github.com/ViGEm/ViGEmBus) driver by Nefarius.
