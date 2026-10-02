@@ -9,7 +9,10 @@ Xbox 360 controller emulation driver is provided by ViGEm (https://github.com/Vi
 
 ## How it works
 Stadia-ViGEm program at start scans for Stadia Controllers and then proxies found Stadia Controllers to virtual Xbox 360 gamepads (with help from ViGEmBus). Also Stadia-ViGEm subscribes to system device plug/unplug notifications and rescans for devices on each notification.
-All found devices are displayed in the tray icon context menu. Manual device rescan can be initiated via the tray icon context menu.
+All found devices are shown in a flyout panel when you click the tray icon, with their connection type (USB or Bluetooth). The panel updates live as controllers connect or disconnect, and has Refresh (manual rescan), Quit and Hide buttons.
+
+## Tray icon and panel
+The tray icon changes each time a controller connects (white, black or wasabi, like the Stadia controller colors) and turns blue when no controller is connected or ViGEmBus has an error. Clicking it opens a small panel that stays open until you press Hide or Esc, and can be dragged anywhere.
 
 ## Double input
 Stadia-ViGEm creates a virtual Xbox 360 controller which results in double input issues when some applications will read input from both the virtual and the real Stadia controller. To avoid this, install [HidHide](https://github.com/ViGEm/HidHide) and configure it as follows:
